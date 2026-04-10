@@ -1,15 +1,15 @@
 # pi-openresolve
 
-`pi-openresolve` is a Pi Coding Agent extension that detects unresolved Git merge conflicts in TypeScript files and returns structured JSON context for each conflict.
+`pi-openresolve` is a Pi Coding Agent extension that detects unresolved Git merge conflicts in source files and returns structured JSON context for each conflict.
 
-It registers a `conflicts` command that can scan a whole workspace, a specific directory, or a single TypeScript file (`.ts`, `.tsx`, `.mts`, `.cts`).
+It registers a `conflicts` command that can scan a whole workspace, a specific directory, or a single supported file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, `.py`, `.go`, `.rs`).
 
 ## What it does
 
-- Recursively scans TypeScript files while skipping `node_modules`, `.git`, and `dist`.
+- Recursively scans supported source files while skipping `node_modules`, `.git`, and `dist`.
 - Detects conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) and groups them into conflict hunks.
 - Captures both sides of each conflict (`ours` and `theirs`) with exact line ranges.
-- Extracts surrounding TypeScript scope context (function, method, class, interface, type, enum, namespace, or generic block).
+- Extracts surrounding language-aware scope context using Tree-sitter parsers (JS, TS, TSX, Python, Go, Rust).
 - Sends a structured payload as `openresolve.conflicts` for downstream tooling/automation.
 
 ## Command
@@ -94,3 +94,5 @@ When conflicts are found, the extension:
 ## Source
 
 Primary implementation: `extensions/openresolve.ts`
+
+Test fixtures with intentional conflict markers: `fixtures/conflicts/`
