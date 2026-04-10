@@ -1,12 +1,16 @@
 {
   "name": "pi-openresolve",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Openresolve extension for pi (currently lists merge conflicts in TypeScript code)",
   "author": "Amaan Bilwar",
   "license": "ISC",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./extensions/openresolve.ts"]
+    "extensions": [
+      "./extensions/openresolve.ts"
+    ]
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.66.1"
