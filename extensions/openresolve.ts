@@ -1,8 +1,15 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import Parser = require("tree-sitter");
+import JavaScript = require("tree-sitter-javascript");
+import TypeScriptGrammars = require("tree-sitter-typescript");
+import Python = require("tree-sitter-python");
+import Go = require("tree-sitter-go");
+import Rust = require("tree-sitter-rust");
 
 type ScopeType = "function" | "method" | "class" | "interface" | "type" | "enum" | "namespace" | "block";
+type SupportedLanguage = "javascript" | "typescript" | "tsx" | "python" | "go" | "rust";
 
 interface ConflictHunk {
 	startLine: number;
@@ -38,7 +45,8 @@ interface ConflictPayload {
 	}>;
 }
 
-const SUPPORTED_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+const SUPPORTED_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".py", ".go", ".rs"]);
+const parserCache: Partial<Record<SupportedLanguage, Parser>> = {};
 
 function normalizeTarget(args: string): string | undefined {
 	const trimmed = args.trim();
@@ -50,7 +58,7 @@ function isIgnoredDir(name: string): boolean {
 	return name === "node_modules" || name === ".git" || name === "dist";
 }
 
-function collectTypeScriptFiles(baseDir: string): string[] {
+function collectSupportedFiles(baseDir: string): string[] {
 	const files: string[] = [];
 	const stack = [baseDir];
 
@@ -82,7 +90,7 @@ function collectTypeScriptFiles(baseDir: string): string[] {
 }
 
 function resolveTargetFiles(cwd: string, target: string | undefined): { files: string[]; error?: string } {
-	if (!target) return { files: collectTypeScriptFiles(cwd) };
+	if (!target) return { files: collectSupportedFiles(cwd) };
 
 	const absolute = resolve(cwd, target);
 	if (!existsSync(absolute)) return { files: [], error: `Path not found: ${target}` };
@@ -99,7 +107,7 @@ function resolveTargetFiles(cwd: string, target: string | undefined): { files: s
 		return { files: [absolute] };
 	}
 
-	if (stats.isDirectory()) return { files: collectTypeScriptFiles(absolute) };
+	if (stats.isDirectory()) return { files: collectSupportedFiles(absolute) };
 
 	return { files: [], error: `Path is neither file nor directory: ${target}` };
 }
@@ -170,146 +178,123 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 	return hunks;
 }
 
-function stripStringsAndComments(
-	line: string,
-	state: { inBlockComment: boolean },
-): { text: string; inBlockComment: boolean } {
-	let inBlockComment = state.inBlockComment;
-	let inSingleQuote = false;
-	let inDoubleQuote = false;
-	let inTemplate = false;
-	let escaped = false;
-	let out = "";
-
-	for (let i = 0; i < line.length; i++) {
-		const ch = line[i];
-		const next = i + 1 < line.length ? line[i + 1] : "";
-		if (inBlockComment) {
-			if (ch === "*" && next === "/") {
-				inBlockComment = false;
-				i++;
-			}
-			continue;
-		}
-		if (!inSingleQuote && !inDoubleQuote && !inTemplate) {
-			if (ch === "/" && next === "*") {
-				inBlockComment = true;
-				i++;
-				continue;
-			}
-			if (ch === "/" && next === "/") break;
-		}
-		if (escaped) {
-			escaped = false;
-			continue;
-		}
-		if (inSingleQuote) {
-			if (ch === "\\") escaped = true;
-			else if (ch === "'") inSingleQuote = false;
-			continue;
-		}
-		if (inDoubleQuote) {
-			if (ch === "\\") escaped = true;
-			else if (ch === '"') inDoubleQuote = false;
-			continue;
-		}
-		if (inTemplate) {
-			if (ch === "\\") escaped = true;
-			else if (ch === "`") inTemplate = false;
-			continue;
-		}
-		if (ch === "'") {
-			inSingleQuote = true;
-			continue;
-		}
-		if (ch === '"') {
-			inDoubleQuote = true;
-			continue;
-		}
-		if (ch === "`") {
-			inTemplate = true;
-			continue;
-		}
-		out += ch;
-	}
-	return { text: out, inBlockComment };
+function detectLanguageFromPath(filePath: string): SupportedLanguage | undefined {
+	const extension = extname(filePath).toLowerCase();
+	if (extension === ".js" || extension === ".mjs" || extension === ".cjs") return "javascript";
+	if (extension === ".tsx") return "tsx";
+	if (extension === ".ts" || extension === ".mts" || extension === ".cts") return "typescript";
+	if (extension === ".py") return "python";
+	if (extension === ".go") return "go";
+	if (extension === ".rs") return "rust";
+	return undefined;
 }
 
-function detectScopeType(lines: string[], lineIndex: number, braceColumn: number, lookbackLines: number): ScopeType {
-	const start = Math.max(0, lineIndex - lookbackLines + 1);
-	const parts = lines.slice(start, lineIndex + 1);
-	if (parts.length === 0) return "block";
-	parts[parts.length - 1] = parts[parts.length - 1].slice(0, braceColumn);
-	const header = parts.join("\n").trim();
-	const headerLines = header.split("\n");
-	const lastLine = headerLines[headerLines.length - 1]?.trim() ?? "";
+function getParserForLanguage(language: SupportedLanguage): Parser | undefined {
+	if (parserCache[language]) return parserCache[language];
 
-	if (/\bfunction\s+[A-Za-z_$][\w$]*\s*\(/.test(lastLine)) return "function";
-	if (/\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s+)?\([^)]*\)\s*=>/.test(lastLine)) return "function";
+	const parser = new Parser();
+	try {
+		if (language === "javascript") parser.setLanguage(JavaScript);
+		if (language === "typescript") parser.setLanguage(TypeScriptGrammars.typescript);
+		if (language === "tsx") parser.setLanguage(TypeScriptGrammars.tsx);
+		if (language === "python") parser.setLanguage(Python);
+		if (language === "go") parser.setLanguage(Go);
+		if (language === "rust") parser.setLanguage(Rust);
+		parserCache[language] = parser;
+		return parser;
+	} catch {
+		return undefined;
+	}
+}
+
+function mapNodeTypeToScopeType(nodeType: string): ScopeType | undefined {
 	if (
-		/^(?:public|private|protected|static|async|readonly|get|set\s+)?[A-Za-z_$][\w$]*\s*\([^)]*\)\s*$/.test(lastLine)
+		nodeType === "function_declaration" ||
+		nodeType === "generator_function_declaration" ||
+		nodeType === "function_expression" ||
+		nodeType === "arrow_function"
 	) {
+		return "function";
+	}
+	if (nodeType === "method_definition" || nodeType === "method_signature" || nodeType === "abstract_method_signature") {
 		return "method";
 	}
-	if (/\bclass\s+[A-Za-z_$][\w$]*/m.test(header)) return "class";
-	if (/\binterface\s+[A-Za-z_$][\w$]*/m.test(header)) return "interface";
-	if (/\btype\s+[A-Za-z_$][\w$]*\s*=\s*/m.test(header)) return "type";
-	if (/\benum\s+[A-Za-z_$][\w$]*/m.test(header)) return "enum";
-	if (/\bnamespace\s+[A-Za-z_$][\w$]*/m.test(header)) return "namespace";
-	return "block";
+	if (nodeType === "class_declaration" || nodeType === "class") return "class";
+	if (nodeType === "class_definition") return "class";
+	if (nodeType === "interface_declaration") return "interface";
+	if (nodeType === "interface_type" || nodeType === "trait_item") return "interface";
+	if (nodeType === "type_alias_declaration") return "type";
+	if (nodeType === "type_declaration" || nodeType === "type_spec" || nodeType === "type_item" || nodeType === "struct_item") {
+		return "type";
+	}
+	if (nodeType === "enum_declaration") return "enum";
+	if (nodeType === "enum_item") return "enum";
+	if (nodeType === "internal_module") return "namespace";
+	if (nodeType === "module" || nodeType === "mod_item") return "namespace";
+	if (nodeType === "method_declaration") return "method";
+	if (nodeType === "function_definition" || nodeType === "function_declaration" || nodeType === "function_item") {
+		return "function";
+	}
+	if (nodeType === "statement_block" || nodeType === "class_body") return "block";
+	return undefined;
 }
 
-function extractTypeScriptConflictContext(
+function fallbackConflictContext(lines: string[], conflictStartLine: number, conflictEndLine: number): ConflictContext {
+	const startLine = Math.max(1, conflictStartLine - 20);
+	const endLine = Math.min(lines.length, conflictEndLine + 20);
+	return {
+		scopeType: "block",
+		scopeStartLine: startLine,
+		scopeEndLine: endLine,
+		conflictStartLine,
+		conflictEndLine,
+		snippet: lines.slice(startLine - 1, endLine).join("\n"),
+	};
+}
+
+function extractConflictContext(
 	content: string,
+	filePath: string,
 	conflictStartLine: number,
 	conflictEndLine: number,
 ): ConflictContext {
 	const lines = splitLines(content);
-	const blocks: Array<{ openLine: number; closeLine: number; scopeType: ScopeType }> = [];
-	const stack: Array<{ line: number; scopeType: ScopeType }> = [];
-	let inBlockComment = false;
+	const language = detectLanguageFromPath(filePath);
+	if (!language) return fallbackConflictContext(lines, conflictStartLine, conflictEndLine);
 
-	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-		const cleaned = stripStringsAndComments(lines[lineIndex], { inBlockComment });
-		inBlockComment = cleaned.inBlockComment;
-		for (let i = 0; i < cleaned.text.length; i++) {
-			const ch = cleaned.text[i];
-			if (ch === "{") {
-				stack.push({ line: lineIndex + 1, scopeType: detectScopeType(lines, lineIndex, i, 6) });
-			} else if (ch === "}") {
-				const open = stack.pop();
-				if (open) blocks.push({ openLine: open.line, closeLine: lineIndex + 1, scopeType: open.scopeType });
+	const parser = getParserForLanguage(language);
+	if (!parser) return fallbackConflictContext(lines, conflictStartLine, conflictEndLine);
+
+	try {
+		const tree = parser.parse(content);
+		const endLineIndex = Math.max(0, conflictEndLine - 1);
+		const endColumn = lines[endLineIndex]?.length ?? 0;
+		let node = tree.rootNode.descendantForPosition(
+			{ row: Math.max(0, conflictStartLine - 1), column: 0 },
+			{ row: endLineIndex, column: endColumn },
+		);
+
+		while (node) {
+			const scopeType = mapNodeTypeToScopeType(node.type);
+			if (scopeType) {
+				const scopeStartLine = node.startPosition.row + 1;
+				const scopeEndLine = Math.max(scopeStartLine, node.endPosition.row + 1);
+				return {
+					scopeType,
+					scopeStartLine,
+					scopeEndLine,
+					conflictStartLine,
+					conflictEndLine,
+					snippet: lines.slice(scopeStartLine - 1, scopeEndLine).join("\n"),
+				};
 			}
+			node = node.parent;
 		}
+	} catch {
+		return fallbackConflictContext(lines, conflictStartLine, conflictEndLine);
 	}
 
-	let best: { openLine: number; closeLine: number; scopeType: ScopeType } | undefined;
-	for (const block of blocks) {
-		if (block.openLine > conflictStartLine || block.closeLine < conflictEndLine) continue;
-		if (!best || block.closeLine - block.openLine < best.closeLine - best.openLine) best = block;
-	}
-
-	if (!best) {
-		const startLine = Math.max(1, conflictStartLine - 20);
-		const endLine = Math.min(lines.length, conflictEndLine + 20);
-		return {
-			scopeType: "block",
-			scopeStartLine: startLine,
-			scopeEndLine: endLine,
-			conflictStartLine,
-			conflictEndLine,
-			snippet: lines.slice(startLine - 1, endLine).join("\n"),
-		};
-	}
-
-	return {
-		scopeType: best.scopeType,
-		scopeStartLine: best.openLine,
-		scopeEndLine: best.closeLine,
-		conflictStartLine,
-		conflictEndLine,
-		snippet: lines.slice(best.openLine - 1, best.closeLine).join("\n"),
-	};
+	return fallbackConflictContext(lines, conflictStartLine, conflictEndLine);
 }
 
 async function buildPayload(cwd: string, target: string | undefined): Promise<ConflictPayload | { error: string }> {
@@ -332,7 +317,7 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 
 		const conflicts = hunks.map((hunk) => ({
 			hunk,
-			context: extractTypeScriptConflictContext(content, hunk.startLine, hunk.endLine),
+			context: extractConflictContext(content, filePath, hunk.startLine, hunk.endLine),
 		}));
 
 		payload.files.push({
@@ -349,7 +334,7 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 
 export default function openresolve(pi: ExtensionAPI) {
 	pi.registerCommand("conflicts", {
-		description: "Find TypeScript merge conflicts and return structured JSON context",
+		description: "Find JS/TS/Python/Go/Rust merge conflicts and return structured JSON context",
 		handler: async (args, ctx) => {
 			const target = normalizeTarget(args);
 			const payloadOrError = await buildPayload(ctx.cwd, target);
