@@ -2,7 +2,19 @@
 
 `pi-openresolve` is a Pi Coding Agent extension that detects unresolved Git merge conflicts in source files and returns structured JSON context for each conflict.
 
-It registers a `conflicts` command that can scan a whole workspace, a specific directory, or a single supported file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, `.py`, `.go`, `.rs`).
+It registers a `resolve-conflict` command that can scan a whole workspace, a specific directory, or a single supported file (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`, `.py`, `.go`, `.rs`).
+
+## Installation
+
+**npm:**
+```bash
+pi install npm:pi-openresolve
+```
+
+**GitHub:**
+```bash
+pi install git:github.com/AmaanBilwar/pi-openresolve.git
+```
 
 ## What it does
 
@@ -10,12 +22,12 @@ It registers a `conflicts` command that can scan a whole workspace, a specific d
 - Detects conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) and groups them into conflict hunks.
 - Captures both sides of each conflict (`ours` and `theirs`) with exact line ranges.
 - Extracts surrounding language-aware scope context using Tree-sitter parsers (JS, TS, TSX, Python, Go, Rust).
-- Sends a structured payload as `openresolve.conflicts` for downstream tooling/automation.
+- Sends structured payload as message for downstream tooling/automation.
 
 ## Command
 
-- Name: `/conflicts`
-- Description: `Find TypeScript merge conflicts and return structured JSON context`
+- Name: `/resolve-conflict`
+- Description: `Find JS/TS/Python/Go/Rust merge conflicts and return structured JSON context`
 
 ### Arguments
 
@@ -25,70 +37,21 @@ It registers a `conflicts` command that can scan a whole workspace, a specific d
 
 Examples:
 
-```txt
-conflicts
-conflicts src
-conflicts src/app/main.ts
-conflicts @src
+```
+resolve-conflict
+resolve-conflict src
+resolve-conflict src/app/main.ts
+resolve-conflict @src
 ```
 
-## Output shape
+## Integration
 
-The command emits JSON with high-level scan stats and detailed conflict entries per file.
-
-```json
-{
-  "cwd": "...",
-  "target": "src",
-  "scannedFiles": 42,
-  "filesWithConflicts": 3,
-  "totalConflicts": 7,
-  "files": [
-    {
-      "filePath": "src/example.ts",
-      "conflictCount": 2,
-      "conflicts": [
-        {
-          "hunk": {
-            "startLine": 10,
-            "endLine": 22,
-            "oursStartLine": 11,
-            "oursEndLine": 15,
-            "theirsStartLine": 17,
-            "theirsEndLine": 21,
-            "ours": "...",
-            "theirs": "...",
-            "raw": "..."
-          },
-          "context": {
-            "scopeType": "function",
-            "scopeStartLine": 1,
-            "scopeEndLine": 40,
-            "conflictStartLine": 10,
-            "conflictEndLine": 22,
-            "snippet": "..."
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-## Behavior notes
-
-- Unsupported file extensions return an error message with supported extensions.
-- Missing paths return `Path not found`.
-- If no enclosing TypeScript block is detected, context falls back to a nearby window around the conflict.
-
-## Integration details
-
-When conflicts are found, the extension:
+When conflicts found:
 
 - Sends a message with:
-  - `customType`: `openresolve.conflicts`
-  - `content`: pretty-printed JSON payload
-  - `details`: target + scan counts
+  - `customType`: `conflicts_found`
+  - `content`: summary string
+  - `details`: full scan payload
 - Shows a UI notification summarizing scanned files and discovered conflicts.
 
 ## Source
