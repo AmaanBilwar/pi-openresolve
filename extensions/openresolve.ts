@@ -1,12 +1,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import Parser = require("tree-sitter");
-import JavaScript = require("tree-sitter-javascript");
-import TypeScriptGrammars = require("tree-sitter-typescript");
-import Python = require("tree-sitter-python");
-import Go = require("tree-sitter-go");
-import Rust = require("tree-sitter-rust");
+import * as Parser from "tree-sitter";
+import JavaScript from "tree-sitter-javascript";
+import TypeScriptGrammars from "tree-sitter-typescript";
+import Python from "tree-sitter-python";
+import Go from "tree-sitter-go";
+import Rust from "tree-sitter-rust";
 
 type ScopeType = "function" | "method" | "class" | "interface" | "type" | "enum" | "namespace" | "block";
 type SupportedLanguage = "javascript" | "typescript" | "tsx" | "python" | "go" | "rust";
@@ -288,7 +288,7 @@ function extractConflictContext(
 					snippet: lines.slice(scopeStartLine - 1, scopeEndLine).join("\n"),
 				};
 			}
-			node = node.parent;
+			node = node.parent!;
 		}
 	} catch {
 		return fallbackConflictContext(lines, conflictStartLine, conflictEndLine);
@@ -335,12 +335,12 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 export default function openresolve(pi: ExtensionAPI) {
 	pi.registerCommand("resolve-conflict", {
 		description: "Find JS/TS/Python/Go/Rust merge conflicts and return structured JSON context",
-		handler: async (args, ctx) => {
+		handler: async (args, ctx): Promise<void> => {
 			const target = normalizeTarget(args);
 			const payloadOrError = await buildPayload(ctx.cwd, target);
 			if ("error" in payloadOrError) {
 				ctx.ui.notify(payloadOrError.error, "error");
-				return payloadOrError;
+				return;
 			}
 
 			ctx.ui.notify(
@@ -353,13 +353,13 @@ export default function openresolve(pi: ExtensionAPI) {
 				{
 				    customType: "conflicts_found",
 				    content: `Found ${payloadOrError.totalConflicts} merge conflict(s) in ${payloadOrError.filesWithConflicts} file(s)`,
+				    display: true,
 				    details: payloadOrError,
 				},
 				{ triggerTurn: true },
 			);
 
-			// return json to harness
-			return payloadOrError;
+			return;
 		},
 	});
 }
