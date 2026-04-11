@@ -333,33 +333,33 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 }
 
 export default function openresolve(pi: ExtensionAPI) {
-	pi.registerCommand("conflicts", {
+	pi.registerCommand("resolve-conflict", {
 		description: "Find JS/TS/Python/Go/Rust merge conflicts and return structured JSON context",
 		handler: async (args, ctx) => {
 			const target = normalizeTarget(args);
 			const payloadOrError = await buildPayload(ctx.cwd, target);
 			if ("error" in payloadOrError) {
 				ctx.ui.notify(payloadOrError.error, "error");
-				return;
+				return payloadOrError;
 			}
 
-			const json = JSON.stringify(payloadOrError, null, 2);
-			pi.sendMessage({
-				customType: "openresolve.conflicts",
-				content: json,
-				display: true,
-				details: {
-					target,
-					totalConflicts: payloadOrError.totalConflicts,
-					filesWithConflicts: payloadOrError.filesWithConflicts,
-					scannedFiles: payloadOrError.scannedFiles,
-				},
-			});
-
 			ctx.ui.notify(
-				`openresolve: scanned ${payloadOrError.scannedFiles} file(s), found ${payloadOrError.totalConflicts} conflict(s) in ${payloadOrError.filesWithConflicts} file(s)`,
+				`found ${payloadOrError.totalConflicts} conflict(s)`,
 				"info",
 			);
+
+			// Send message to trigger agent action
+			pi.sendMessage(
+				{
+				    customType: "conflicts_found",
+				    content: `Found ${payloadOrError.totalConflicts} merge conflict(s) in ${payloadOrError.filesWithConflicts} file(s)`,
+				    details: payloadOrError,
+				},
+				{ triggerTurn: true },
+			);
+
+			// return json to harness
+			return payloadOrError;
 		},
 	});
 }
