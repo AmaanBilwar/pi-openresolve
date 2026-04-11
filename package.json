@@ -1,6 +1,6 @@
 {
   "name": "pi-openresolve",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Openresolve extension for pi (currently lists merge conflicts in TypeScript code)",
   "author": "Amaan Bilwar",
   "license": "ISC",
