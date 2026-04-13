@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { extname, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as Parser from "tree-sitter";
@@ -20,7 +21,39 @@ interface ConflictHunk {
 	theirsEndLine: number;
 	ours: string;
 	theirs: string;
+	oursLabel?: string;
+	theirsLabel?: string;
 	raw: string;
+}
+
+interface GitCommitSummary {
+	sha: string;
+	shortSha: string;
+	authorName: string;
+	authorEmail: string;
+	subject: string;
+}
+
+interface RepoGitMetadata {
+	repoRoot: string;
+	currentBranch?: string;
+	headSha?: string;
+	mergeHeadSha?: string;
+	mergeBaseSha?: string;
+}
+
+interface ConflictFileGitMetadata {
+	pathFromRepoRoot: string;
+	baseBlobSha?: string;
+	oursBlobSha?: string;
+	theirsBlobSha?: string;
+	baseToOursDiff?: string;
+	baseToTheirsDiff?: string;
+	oursToTheirsDiff?: string;
+	oursCommits?: GitCommitSummary[];
+	theirsCommits?: GitCommitSummary[];
+	oursAuthors?: string[];
+	theirsAuthors?: string[];
 }
 
 interface ConflictContext {
@@ -35,12 +68,14 @@ interface ConflictContext {
 interface ConflictPayload {
 	cwd: string;
 	target?: string;
+	git?: RepoGitMetadata;
 	scannedFiles: number;
 	filesWithConflicts: number;
 	totalConflicts: number;
 	files: Array<{
 		filePath: string;
 		conflictCount: number;
+		git?: ConflictFileGitMetadata;
 		conflicts: Array<{ hunk: ConflictHunk; context: ConflictContext }>;
 	}>;
 }
@@ -125,6 +160,7 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 	let separatorLine: number | undefined;
 	let ours: string[] = [];
 	let theirs: string[] = [];
+	let oursLabel: string | undefined;
 	let state: "outside" | "ours" | "theirs" = "outside";
 
 	for (let i = 0; i < lines.length; i++) {
@@ -137,6 +173,7 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 				separatorLine = undefined;
 				ours = [];
 				theirs = [];
+				oursLabel = line.trimStart().slice("<<<<<<< ".length).trim() || undefined;
 			}
 			continue;
 		}
@@ -153,6 +190,7 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 
 		if (line.trimStart().startsWith(">>>>>>> ") && startLine !== undefined && separatorLine !== undefined) {
 			const endLine = lineNumber;
+			const theirsLabel = line.trimStart().slice(">>>>>>> ".length).trim() || undefined;
 			hunks.push({
 				startLine,
 				endLine,
@@ -162,6 +200,8 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 				theirsEndLine: endLine - 1,
 				ours: ours.join("\n"),
 				theirs: theirs.join("\n"),
+				oursLabel,
+				theirsLabel,
 				raw: lines.slice(startLine - 1, endLine).join("\n"),
 			});
 			state = "outside";
@@ -169,6 +209,7 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 			separatorLine = undefined;
 			ours = [];
 			theirs = [];
+			oursLabel = undefined;
 			continue;
 		}
 
@@ -176,6 +217,149 @@ function detectConflictHunks(content: string): ConflictHunk[] {
 	}
 
 	return hunks;
+}
+
+function runGitCommand(cwd: string, args: string[], trimOutput = true): { ok: boolean; stdout: string } {
+	const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+	if (result.error || result.status !== 0) return { ok: false, stdout: "" };
+	const stdout = typeof result.stdout === "string" ? result.stdout : "";
+	return { ok: true, stdout: trimOutput ? stdout.trim() : stdout };
+}
+
+function getOptionalGitValue(cwd: string, args: string[]): string | undefined {
+	const result = runGitCommand(cwd, args, true);
+	return result.ok && result.stdout ? result.stdout : undefined;
+}
+
+function parseGitLogSummaries(output: string): GitCommitSummary[] {
+	if (!output.trim()) return [];
+	return output
+		.split(/\r?\n/)
+		.map((line) => line.split("\u001f"))
+		.filter((parts) => parts.length >= 5)
+		.map(([sha, shortSha, authorName, authorEmail, subject]) => ({
+			sha,
+			shortSha,
+			authorName,
+			authorEmail,
+			subject,
+		}));
+}
+
+function collectAuthors(commits: GitCommitSummary[]): string[] {
+	const seen = new Set<string>();
+	for (const commit of commits) seen.add(`${commit.authorName} <${commit.authorEmail}>`);
+	return Array.from(seen);
+}
+
+function parseUnmergedStages(output: string): Partial<Record<1 | 2 | 3, string>> {
+	const stages: Partial<Record<1 | 2 | 3, string>> = {};
+	for (const line of output.split(/\r?\n/)) {
+		const match = line.match(/^\d+\s+([0-9a-f]{40})\s+([123])\t/);
+		if (!match) continue;
+		const sha = match[1];
+		const stage = Number(match[2]) as 1 | 2 | 3;
+		if (!stages[stage]) stages[stage] = sha;
+	}
+	return stages;
+}
+
+function diffBlobPair(cwd: string, leftSha: string | undefined, rightSha: string | undefined): string | undefined {
+	if (!leftSha || !rightSha) return undefined;
+	const diff = runGitCommand(cwd, ["diff", "--no-color", leftSha, rightSha], false);
+	return diff.ok ? diff.stdout.trim() : undefined;
+}
+
+function collectRepoGitMetadata(cwd: string): RepoGitMetadata | undefined {
+	const root = getOptionalGitValue(cwd, ["rev-parse", "--show-toplevel"]);
+	if (!root) return undefined;
+
+	const currentBranch = getOptionalGitValue(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	const headSha = getOptionalGitValue(cwd, ["rev-parse", "HEAD"]);
+	const mergeHeadSha = getOptionalGitValue(cwd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+	const mergeBaseSha = headSha && mergeHeadSha ? getOptionalGitValue(cwd, ["merge-base", headSha, mergeHeadSha]) : undefined;
+
+	return {
+		repoRoot: root,
+		currentBranch,
+		headSha,
+		mergeHeadSha,
+		mergeBaseSha,
+	};
+}
+
+function collectConflictFileGitMetadata(
+	repo: RepoGitMetadata | undefined,
+	absoluteFilePath: string,
+): ConflictFileGitMetadata | undefined {
+	if (!repo) return undefined;
+	const pathFromRepoRoot = relative(repo.repoRoot, absoluteFilePath).replace(/\\/g, "/");
+	if (!pathFromRepoRoot || pathFromRepoRoot.startsWith("..")) return undefined;
+
+	const unmerged = runGitCommand(repo.repoRoot, ["ls-files", "-u", "--", pathFromRepoRoot]);
+	if (!unmerged.ok || !unmerged.stdout) return { pathFromRepoRoot };
+
+	const stages = parseUnmergedStages(unmerged.stdout);
+	const baseBlobSha = stages[1];
+	const oursBlobSha = stages[2];
+	const theirsBlobSha = stages[3];
+
+	let oursCommits: GitCommitSummary[] | undefined;
+	let theirsCommits: GitCommitSummary[] | undefined;
+	let oursAuthors: string[] | undefined;
+	let theirsAuthors: string[] | undefined;
+
+	if (repo.mergeBaseSha && repo.headSha) {
+		const oursLog = runGitCommand(
+			repo.repoRoot,
+			[
+				"log",
+				"--format=%H%x1f%h%x1f%an%x1f%ae%x1f%s",
+				"-n",
+				"10",
+				`${repo.mergeBaseSha}..${repo.headSha}`,
+				"--",
+				pathFromRepoRoot,
+			],
+		);
+		if (oursLog.ok) {
+			oursCommits = parseGitLogSummaries(oursLog.stdout);
+			oursAuthors = collectAuthors(oursCommits);
+		}
+	}
+
+	if (repo.mergeBaseSha && repo.mergeHeadSha) {
+		const theirsLog = runGitCommand(
+			repo.repoRoot,
+			[
+				"log",
+				"--format=%H%x1f%h%x1f%an%x1f%ae%x1f%s",
+				"-n",
+				"10",
+				`${repo.mergeBaseSha}..${repo.mergeHeadSha}`,
+				"--",
+				pathFromRepoRoot,
+			],
+		);
+		if (theirsLog.ok) {
+			theirsCommits = parseGitLogSummaries(theirsLog.stdout);
+			theirsAuthors = collectAuthors(theirsCommits);
+		}
+	}
+
+	return {
+		pathFromRepoRoot,
+		baseBlobSha,
+		oursBlobSha,
+		theirsBlobSha,
+		baseToOursDiff: diffBlobPair(repo.repoRoot, baseBlobSha, oursBlobSha),
+		baseToTheirsDiff: diffBlobPair(repo.repoRoot, baseBlobSha, theirsBlobSha),
+		oursToTheirsDiff: diffBlobPair(repo.repoRoot, oursBlobSha, theirsBlobSha),
+		oursCommits,
+		theirsCommits,
+		oursAuthors,
+		theirsAuthors,
+	};
 }
 
 function detectLanguageFromPath(filePath: string): SupportedLanguage | undefined {
@@ -304,6 +488,7 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 	const payload: ConflictPayload = {
 		cwd,
 		target,
+		git: collectRepoGitMetadata(cwd),
 		scannedFiles: resolved.files.length,
 		filesWithConflicts: 0,
 		totalConflicts: 0,
@@ -323,6 +508,7 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 		payload.files.push({
 			filePath: relative(cwd, filePath).replace(/\\/g, "/") || filePath,
 			conflictCount: conflicts.length,
+			git: collectConflictFileGitMetadata(payload.git, filePath),
 			conflicts,
 		});
 		payload.totalConflicts += conflicts.length;
@@ -333,6 +519,24 @@ async function buildPayload(cwd: string, target: string | undefined): Promise<Co
 }
 
 export default function openresolve(pi: ExtensionAPI) {
+	pi.registerMessageRenderer("conflicts_found", (message, options, theme) => {
+		const { expanded } = options;
+		let text = theme.fg("accent", "⚔l ");
+		text += message.content;
+
+		if (expanded && message.details) {
+			const d = message.details as { filesWithConflicts: number; totalConflicts: number; files: Array<{ filePath: string; conflictCount: number; git?: { oursAuthors?: string[]; theirsAuthors?: string[] } }> };
+			for (const f of d.files) {
+				const authors = f.git
+					? [...(f.git.oursAuthors ?? []), ...(f.git.theirsAuthors ?? [])].filter(Boolean).join(", ") || "unknown"
+					: "no git info";
+				text += "\n" + theme.fg("dim", `  ${f.filePath}: ${f.conflictCount} conflict(s), authors: ${authors}`);
+			}
+		}
+
+		return new (require("@mariozechner/pi-tui").Text)(text, 0, 0);
+	});
+
 	pi.registerCommand("resolve-conflict", {
 		description: "Find JS/TS/Python/Go/Rust merge conflicts and return structured JSON context",
 		handler: async (args, ctx): Promise<void> => {
